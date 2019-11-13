@@ -5,7 +5,7 @@ use std::thread;
 /// Modified ThreadPool that hold Worker instances instead of holding threads directly
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: mpsc::Sender<Job>,
+    sender: mpsc::Sender<Message>,
 }
 
 impl ThreadPool {
@@ -44,7 +44,28 @@ impl ThreadPool {
     {
         // A `Box` that holds each closure (`f`) and then sending the job down the channel
         let job = Box::new(f);
-        self.sender.send(job).unwrap();
+        self.sender.send(Message::NewJob(job)).unwrap();
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        println!("Sending terminate message to all workers.");
+
+        for _ in &mut self.workers {
+            self.sender.send(Message::Terminate).unwrap();
+        }
+
+        println!("Shutting down all workers.");
+
+        for worker in &mut self.workers {
+            println!("Shutting down worker {}", worker.id);
+
+            // Move the thread out of the Worker instance that owns thread so join can consume the thread.
+            if let Some(thread) = worker.thread.take() {
+                thread.join().unwrap();
+            }
+        }
     }
 }
 
@@ -68,32 +89,49 @@ type Job = Box<dyn FnBox + Send + 'static>; // Job type alias is a Box of anythi
 
 struct Worker {
     id: usize,
-    thread: thread::JoinHandle<()>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Worker {
-    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
+    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Message>>>) -> Worker {
         // Receiving and executing the jobs in the worker’s thread
         let thread = thread::spawn(move || {
             // We need the closure to loop forever, asking the receiving end of the channel for a job and running the job when it gets one.
             loop {
-                let job = receiver.lock().unwrap().recv().unwrap();
+                let message = receiver.lock().unwrap().recv().unwrap();
 
-                println!("Worker {} got a job; executing.", id);
+                match message {
+                    Message::NewJob(job) => {
+                        println!("Worker {} got a job; executing.", id);
 
-                // Compiler error: cannot move a value of type FnOnce() + Send: the size of FnOnce() + Send cannot be statically determined
-                // Rust is still a work in progress with places where the compiler could be improved,
-                // but in the future, the code like this should work just fine. People just like you are working to fix this and other issues!
-                //
-                // But for now, let’s work around this problem using a handy trick. We can tell Rust explicitly that in this case we can
-                // take ownership of the value inside the `Box<T>` using `self: Box<Self>`; then, once we have ownership of the closure, we can call it.
-                // (*job)();
+                        // Compiler error: cannot move a value of type FnOnce() + Send: the size of FnOnce() + Send cannot be statically determined
+                        // Rust is still a work in progress with places where the compiler could be improved,
+                        // but in the future, the code like this should work just fine. People just like you are working to fix this and other issues!
+                        //
+                        // But for now, let’s work around this problem using a handy trick. We can tell Rust explicitly that in this case we can
+                        // take ownership of the value inside the `Box<T>` using `self: Box<Self>`; then, once we have ownership of the closure, we can call it.
+                        // (*job)();
 
-                // Change `Worker` to use the `call_box` method
-                job.call_box();
+                        // Change `Worker` to use the `call_box` method
+                        job.call_box();
+                    }
+                    Message::Terminate => {
+                        println!("Worker {} was told to terminate.", id);
+
+                        break;
+                    }
+                }
             }
         });
 
-        Worker { id, thread }
+        Worker {
+            id,
+            thread: Some(thread),
+        }
     }
+}
+
+enum Message {
+    NewJob(Job),
+    Terminate,
 }

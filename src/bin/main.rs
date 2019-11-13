@@ -16,7 +16,7 @@ fn main() {
     // The incoming method on TcpListener returns an iterator that gives us
     // a sequence of streams (more specifically, streams of type TcpStream).
     // A single stream represents an open connection between the client and the server.
-    for stream in listener.incoming() {
+    for stream in listener.incoming().take(2) {
         let stream = stream.unwrap();
 
         // A connection is the name for the full request and response process
@@ -28,6 +28,8 @@ fn main() {
             handle_connection(stream);
         });
     }
+
+    println!("Shutting down.");
 }
 
 fn handle_connection(mut stream: TcpStream) {
